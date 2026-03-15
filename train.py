@@ -196,7 +196,10 @@ def main():
     with data_path.open("rb") as handle:
         file_data = joblib.load(handle)
 
-    trajs, mat1, mat2s, mat2t, semantic, social, labels, lens, u_max, l_max = file_data
+    if len(file_data) == 11:
+        trajs, mat1, mat2s, mat2t, semantic, social, labels, lens, u_max, l_max, _meta = file_data
+    else:
+        trajs, mat1, mat2s, mat2t, semantic, social, labels, lens, u_max, l_max = file_data
     mat1 = torch.as_tensor(mat1, dtype=torch.float32)
     mat2s = torch.as_tensor(mat2s, dtype=torch.float32, device=args.device)
     mat2t = torch.as_tensor(mat2t, dtype=torch.float32)

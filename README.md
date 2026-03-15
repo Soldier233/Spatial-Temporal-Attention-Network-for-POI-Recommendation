@@ -47,6 +47,7 @@ The repo keeps the original sample files:
 
 - `data/NYC.npy`
 - `data/NYC_POI.npy`
+- `data/dataset_TSMC2014_NYC.csv` can also be used directly if you have the Kaggle export
 
 Each row of `NYC.npy` is `[user id, check-in location id, time in minutes]`.
 
@@ -82,7 +83,33 @@ For NYC:
 python prepare_raw.py --dataset NYC --raw-dir ./data/raw --output-dir ./data
 ```
 
-This expects `data/raw/dataset_TSMC2014_NYC.txt`. If you do not have the raw NYC file, you can directly use the repo-provided `data/NYC.npy` and `data/NYC_POI.npy`.
+The script will first look for `data/dataset_TSMC2014_NYC.csv` and then fall back to `data/raw/dataset_TSMC2014_NYC.txt`.
+If you do not have the raw NYC file, you can directly use the repo-provided `data/NYC.npy` and `data/NYC_POI.npy`.
+
+## Implemented Dimensions
+The current codebase covers the five dimensions below with different levels of fidelity depending on the dataset.
+
+### NYC
+
+- `Spatial`: explicit, from POI latitude/longitude
+- `Temporal`: explicit, from timestamp intervals and weekly time embedding
+- `Semantic`: explicit, from `venueCategoryId` / `venueCategory` when `dataset_TSMC2014_NYC.csv` is available
+- `Personal`: explicit, from each user's prefix-history visit distribution
+- `Social`: proxy, from similar-user preference aggregation based on POI overlap
+
+### Gowalla
+
+- `Spatial`: explicit, from POI latitude/longitude
+- `Temporal`: explicit, from timestamp intervals and weekly time embedding
+- `Semantic`: proxy, from POI co-occurrence within user trajectories
+- `Personal`: explicit, from each user's prefix-history visit distribution
+- `Social`: proxy, from similar-user preference aggregation based on POI overlap
+
+Notes:
+
+- `NYC` has stronger semantic support because the Kaggle / TSMC file includes venue category fields.
+- `Gowalla` in the current pipeline does not include explicit POI category labels, so semantic information is derived from trajectory co-occurrence instead.
+- Neither dataset is currently using an explicit friend graph in this repo, so the social branch is implemented as a user-similarity proxy rather than a true social-network edge model.
 
 ### Build processed tensors
 

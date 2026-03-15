@@ -1,4 +1,5 @@
 import argparse
+import csv
 import gzip
 from collections import Counter
 from datetime import datetime, timedelta
@@ -8,6 +9,7 @@ import numpy as np
 
 
 NYC_FILENAME = "dataset_TSMC2014_NYC.txt"
+NYC_CSV_FILENAME = "dataset_TSMC2014_NYC.csv"
 GOWALLA_FILENAME = "loc-gowalla_totalCheckins.txt.gz"
 
 
@@ -31,11 +33,44 @@ def read_nyc_records(raw_path, min_poi_freq, min_user_checkins):
             if len(parts) != 8:
                 continue
             user_id, venue_id = parts[0], parts[1]
+            category_id = parts[2]
+            category_name = parts[3]
             lat, lon = float(parts[4]), float(parts[5])
             timezone_offset = int(parts[6])
             utc_dt = datetime.strptime(parts[7], "%a %b %d %H:%M:%S %z %Y")
             local_dt = utc_dt + timedelta(minutes=timezone_offset)
-            rows.append((user_id, venue_id, int(local_dt.timestamp() // 60), lat, lon))
+            rows.append((user_id, venue_id, int(local_dt.timestamp() // 60), lat, lon, category_id, category_name))
+            poi_counter[venue_id] += 1
+
+    keep_pois = {poi for poi, freq in poi_counter.items() if freq >= min_poi_freq}
+    filtered_rows = [row for row in rows if row[1] in keep_pois]
+
+    if min_user_checkins > 0:
+        user_counter = Counter(row[0] for row in filtered_rows)
+        keep_users = {user for user, freq in user_counter.items() if freq >= min_user_checkins}
+        filtered_rows = [row for row in filtered_rows if row[0] in keep_users]
+
+    return filtered_rows
+
+
+def read_nyc_csv_records(raw_path, min_poi_freq, min_user_checkins):
+    poi_counter = Counter()
+    rows = []
+    with raw_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            if not row:
+                continue
+            user_id = row["userId"]
+            venue_id = row["venueId"]
+            category_id = row["venueCategoryId"]
+            category_name = row["venueCategory"]
+            lat = float(row["latitude"])
+            lon = float(row["longitude"])
+            timezone_offset = int(row["timezoneOffset"])
+            utc_dt = datetime.strptime(row["utcTimestamp"], "%a %b %d %H:%M:%S %z %Y")
+            local_dt = utc_dt + timedelta(minutes=timezone_offset)
+            rows.append((user_id, venue_id, int(local_dt.timestamp() // 60), lat, lon, category_id, category_name))
             poi_counter[venue_id] += 1
 
     keep_pois = {poi for poi, freq in poi_counter.items() if freq >= min_poi_freq}
@@ -147,21 +182,37 @@ def remap_rows(rows):
     user_vocab = {user_id: idx + 1 for idx, user_id in enumerate(sorted({row[0] for row in rows}))}
     poi_vocab = {poi_id: idx + 1 for idx, poi_id in enumerate(sorted({row[1] for row in rows}))}
     poi_coords = {}
+    poi_category = {}
     min_time = min(row[2] for row in rows)
 
     data = np.zeros((len(rows), 3), dtype=np.int32)
-    for idx, (user_id, poi_id, minute_ts, lat, lon) in enumerate(rows):
+    category_tokens = sorted({f"{row[5]}::{row[6]}" for row in rows if len(row) >= 7})
+    category_vocab = {token: idx + 1 for idx, token in enumerate(category_tokens)}
+
+    for idx, row in enumerate(rows):
+        user_id, poi_id, minute_ts, lat, lon = row[:5]
         mapped_poi = poi_vocab[poi_id]
         data[idx, 0] = user_vocab[user_id]
         data[idx, 1] = mapped_poi
         data[idx, 2] = minute_ts - min_time + 1
         poi_coords.setdefault(mapped_poi, (lat, lon))
+        if len(row) >= 7:
+            token = f"{row[5]}::{row[6]}"
+            poi_category.setdefault(mapped_poi, category_vocab[token])
 
     poi = np.zeros((len(poi_vocab), 3), dtype=np.float64)
     for mapped_poi, (lat, lon) in poi_coords.items():
         poi[mapped_poi - 1] = np.array([mapped_poi, lat, lon], dtype=np.float64)
 
-    return data, poi
+    meta = {}
+    if category_vocab:
+        category_ids = np.zeros(len(poi_vocab), dtype=np.int32)
+        for mapped_poi, category_id in poi_category.items():
+            category_ids[mapped_poi - 1] = category_id
+        meta["poi_category_ids"] = category_ids
+        meta["category_vocab"] = category_vocab
+
+    return data, poi, meta
 
 
 def main():
@@ -171,15 +222,19 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.dataset == "NYC":
-        raw_path = raw_dir / NYC_FILENAME
-        if not raw_path.exists():
-            raise FileNotFoundError(
-                f"{raw_path} was not found. The original TSMC NYC source is currently unreliable; "
-                "use an existing data/NYC.npy or place dataset_TSMC2014_NYC.txt under data/raw first."
-            )
+        csv_path = output_dir / NYC_CSV_FILENAME
+        txt_path = raw_dir / NYC_FILENAME
         min_poi_freq = args.min_poi_freq or 10
         min_user_checkins = args.min_user_checkins or 0
-        rows = read_nyc_records(raw_path, min_poi_freq=min_poi_freq, min_user_checkins=min_user_checkins)
+        if csv_path.exists():
+            rows = read_nyc_csv_records(csv_path, min_poi_freq=min_poi_freq, min_user_checkins=min_user_checkins)
+        elif txt_path.exists():
+            rows = read_nyc_records(txt_path, min_poi_freq=min_poi_freq, min_user_checkins=min_user_checkins)
+        else:
+            raise FileNotFoundError(
+                f"Neither {csv_path} nor {txt_path} was found. "
+                "Place dataset_TSMC2014_NYC.csv under data/ or dataset_TSMC2014_NYC.txt under data/raw."
+            )
     else:
         min_poi_freq = args.min_poi_freq or 10
         min_user_checkins = args.min_user_checkins or 10
@@ -204,9 +259,13 @@ def main():
     if not rows:
         raise RuntimeError(f"No rows were produced for dataset {args.dataset}.")
 
-    data, poi = remap_rows(rows)
+    data, poi, meta = remap_rows(rows)
     np.save(output_dir / f"{args.dataset}.npy", data)
     np.save(output_dir / f"{args.dataset}_POI.npy", poi)
+    if meta:
+        import joblib
+
+        joblib.dump(meta, output_dir / f"{args.dataset}_meta.pkl")
     print(
         f"{args.dataset}: users={data[:, 0].max()}, pois={poi.shape[0]}, "
         f"checkins={data.shape[0]}, time_range=({data[:, 2].min()}, {data[:, 2].max()})"

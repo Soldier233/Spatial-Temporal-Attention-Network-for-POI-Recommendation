@@ -70,6 +70,17 @@ def build_semantic_matrix(data, l_max, window_size=3):
     return semantic.astype(np.float32)
 
 
+def build_category_semantic_matrix(category_ids):
+    valid = category_ids > 0
+    semantic = np.eye(len(category_ids), dtype=np.float32)
+    if not np.any(valid):
+        return semantic
+    same_category = category_ids[:, None] == category_ids[None, :]
+    semantic[same_category & valid[:, None] & valid[None, :]] = 1.0
+    semantic[(~same_category) & valid[:, None] & valid[None, :]] = 0.0
+    return semantic
+
+
 def build_social_matrix(data, u_max, l_max, top_k=20):
     # Social proxy: aggregate preferences from similar users when no explicit graph is available.
     visits = np.zeros((u_max, l_max), dtype=np.float32)
@@ -105,6 +116,8 @@ def process_traj(dname, data_dir="./data"):
     base_dir = Path(data_dir)
     data = np.load(base_dir / f"{dname}.npy").astype(np.int64)
     poi = np.load(base_dir / f"{dname}_POI.npy")
+    meta_path = base_dir / f"{dname}_meta.pkl"
+    meta = joblib.load(meta_path) if meta_path.exists() else {}
     num_user = int(np.max(data[:, 0]))
     data_user = data[:, 0]
     trajs, labels, mat1, mat2t, lens = [], [], [], [], []
@@ -138,7 +151,12 @@ def process_traj(dname, data_dir="./data"):
         lens.append(user_len - 2)
 
     mat2s = rs_mat2s(poi)
-    semantic = build_semantic_matrix(data, l_max)
+    if "poi_category_ids" in meta:
+        semantic = build_category_semantic_matrix(np.asarray(meta["poi_category_ids"], dtype=np.int64))
+        semantic_source = "category"
+    else:
+        semantic = build_semantic_matrix(data, l_max)
+        semantic_source = "cooccurrence"
     social = build_social_matrix(data, u_max, l_max)
     zipped = zip(*sorted(zip(trajs, mat1, mat2t, labels, lens), key=lambda x: len(x[0]), reverse=True))
     trajs, mat1, mat2t, labels, lens = zipped
@@ -146,11 +164,23 @@ def process_traj(dname, data_dir="./data"):
     trajs = pad_sequence(trajs, batch_first=True, padding_value=0)
     labels = pad_sequence(labels, batch_first=True, padding_value=0)
 
-    processed = [trajs, np.array(mat1), mat2s, np.array(mat2t), semantic, social, labels, np.array(lens), u_max, l_max]
+    processed = [
+        trajs,
+        np.array(mat1),
+        mat2s,
+        np.array(mat2t),
+        semantic,
+        social,
+        labels,
+        np.array(lens),
+        u_max,
+        l_max,
+        {"semantic_source": semantic_source},
+    ]
     data_pkl = base_dir / f"{dname}_data.pkl"
     with data_pkl.open("wb") as pkl:
         joblib.dump(processed, pkl)
-    print(f"Saved processed dataset to {data_pkl}")
+    print(f"Saved processed dataset to {data_pkl} (semantic={semantic_source})")
 
 
 def parse_args():

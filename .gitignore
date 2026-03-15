@@ -25,6 +25,7 @@ env/
 # Generated datasets and raw downloads
 data/raw/
 data/*_data.pkl
+data/*_meta.pkl
 data/Gowalla.npy
 data/Gowalla_POI.npy
 
