@@ -1,250 +1,242 @@
-from load import *
+import argparse
 import time
-import random
-from torch import optim
+from pathlib import Path
+
+import joblib
+import numpy as np
+import torch
+import torch.nn.functional as F
 import torch.utils.data as data
+from torch import optim
 from tqdm import tqdm
-from models import *
+
+from layers import hours, resolve_device
+from load import max_len
+from models import Model
 
 
-def calculate_acc(prob, label):
-    # log_prob (N, L), label (N), batch_size [*M]
-    acc_train = [0, 0, 0, 0]
-    for i, k in enumerate([1, 5, 10, 20]):
-        # topk_batch (N, k)
-        _, topk_predict_batch = torch.topk(prob, k=k)
-        for j, topk_predict in enumerate(to_npy(topk_predict_batch)):
-            # topk_predict (k)
-            if to_npy(label)[j] in topk_predict:
-                acc_train[i] += 1
-
-    return np.array(acc_train)
+def calculate_recall(prob, label, ks=(1, 5, 10, 20)):
+    label = label.view(-1, 1)
+    topk = torch.topk(prob, k=max(ks), dim=1).indices
+    recalls = []
+    for k in ks:
+        hit = (topk[:, :k] == label).any(dim=1).float().sum().item()
+        recalls.append(hit)
+    return np.array(recalls, dtype=np.float64)
 
 
 def sampling_prob(prob, label, num_neg):
-    num_label, l_m = prob.shape[0], prob.shape[1]-1  # prob (N, L)
-    label = label.view(-1)  # label (N)
-    init_label = np.linspace(0, num_label-1, num_label)  # (N), [0 -- num_label-1]
-    init_prob = torch.zeros(size=(num_label, num_neg+len(label)))  # (N, num_neg+num_label)
+    device = prob.device
+    num_label, loc_count = prob.shape
+    label = label.view(-1)
 
-    random_ig = random.sample(range(1, l_m+1), num_neg)  # (num_neg) from (1 -- l_max)
-    while len([lab for lab in label if lab in random_ig]) != 0:  # no intersection
-        random_ig = random.sample(range(1, l_m+1), num_neg)
+    candidate_mask = torch.ones(loc_count, dtype=torch.bool, device=device)
+    candidate_mask[label] = False
+    available_neg = torch.nonzero(candidate_mask, as_tuple=False).view(-1)
+    if available_neg.numel() == 0:
+        sampled_prob = prob.index_select(1, label)
+        sampled_label = torch.arange(num_label, device=device)
+        return sampled_prob, sampled_label
 
-    global global_seed
-    random.seed(global_seed)
-    global_seed += 1
-
-    # place the pos labels ahead and neg samples in the end
-    for k in range(num_label):
-        for i in range(num_neg + len(label)):
-            if i < len(label):
-                init_prob[k, i] = prob[k, label[i]]
-            else:
-                init_prob[k, i] = prob[k, random_ig[i-len(label)]]
-
-    return torch.FloatTensor(init_prob), torch.LongTensor(init_label)  # (N, num_neg+num_label), (N)
+    num_neg = min(num_neg, int(available_neg.numel()))
+    rand_perm = torch.randperm(available_neg.numel(), device=device)[:num_neg]
+    neg_index = available_neg.index_select(0, rand_perm)
+    sample_index = torch.cat([label, neg_index], dim=0)
+    sampled_prob = prob.index_select(1, sample_index)
+    sampled_label = torch.arange(num_label, device=device)
+    return sampled_prob, sampled_label
 
 
 class DataSet(data.Dataset):
-    def __init__(self, traj, m1, v, label, length):
-        # (NUM, M, 3), (NUM, M, M, 2), (L, L), (NUM, M), (NUM), (NUM)
-        self.traj, self.mat1, self.vec, self.label, self.length = traj, m1, v, label, length
+    def __init__(self, traj, m1, v, label, length, device):
+        self.traj = traj
+        self.mat1 = m1
+        self.vec = v
+        self.label = label
+        self.length = length
+        self.device = device
 
     def __getitem__(self, index):
-        traj = self.traj[index].to(device)
-        mats1 = self.mat1[index].to(device)
-        vector = self.vec[index].to(device)
-        label = self.label[index].to(device)
-        length = self.length[index].to(device)
-        return traj, mats1, vector, label, length
+        return (
+            self.traj[index].to(self.device),
+            self.mat1[index].to(self.device),
+            self.vec[index].to(self.device),
+            self.label[index].to(self.device),
+            self.length[index].to(self.device),
+        )
 
-    def __len__(self):  # no use
+    def __len__(self):
         return len(self.traj)
 
 
 class Trainer:
-    def __init__(self, model, record):
-        # load other parameters
-        self.model = model.to(device)
-        self.records = record
-        self.start_epoch = record['epoch'][-1] if load else 1
-        self.num_neg = 10
-        self.interval = 1000
-        self.batch_size = 1 # N = 1
-        self.learning_rate = 3e-3
-        self.num_epoch = 100
-        self.threshold = np.mean(record['acc_valid'][-1]) if load else 0  # 0 if not update
-
-        # (NUM, M, 3), (NUM, M, M, 2), (L, L), (NUM, M, M), (NUM, M), (NUM) i.e. [*M]
-        self.traj, self.mat1, self.mat2s, self.mat2t, self.label, self.len = \
-            trajs, mat1, mat2s, mat2t, labels, lens
-        # nn.cross_entropy_loss counts target from 0 to C - 1, so we minus 1 here.
-        self.dataset = DataSet(self.traj, self.mat1, self.mat2t, self.label-1, self.len)
-        self.data_loader = data.DataLoader(dataset=self.dataset, batch_size=self.batch_size, shuffle=False)
+    def __init__(self, model, records, tensors, args):
+        self.model = model.to(args.device)
+        self.records = records
+        self.device = args.device
+        self.start_epoch = records["epoch"][-1] + 1 if records["epoch"] else 1
+        self.num_neg = args.num_neg
+        self.batch_size = args.batch_size
+        self.learning_rate = args.learning_rate
+        self.num_epoch = args.epochs
+        self.threshold = np.mean(records["acc_valid"][-1]) if records["acc_valid"] else 0
+        self.save_path = Path(args.checkpoint)
+        self.data_loader = data.DataLoader(
+            dataset=DataSet(*tensors, device=args.device),
+            batch_size=self.batch_size,
+            shuffle=False,
+        )
+        self.part = len(tensors[0])
+        self.mat2s = args.mat2s
 
     def train(self):
-        # set optimizer
         optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=0)
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1000, gamma=1)
 
-        for t in range(self.num_epoch):
-            # settings or validation and test
+        start_time = time.time()
+        for epoch_idx in range(self.num_epoch):
             valid_size, test_size = 0, 0
-            acc_valid, acc_test = [0, 0, 0, 0], [0, 0, 0, 0]
+            acc_valid = np.zeros(4, dtype=np.float64)
+            acc_test = np.zeros(4, dtype=np.float64)
 
-            bar = tqdm(total=part)
-            for step, item in enumerate(self.data_loader):
-                # get batch data, (N, M, 3), (N, M, M, 2), (N, M, M), (N, M), (N)
+            self.model.train()
+            bar = tqdm(total=self.part, desc=f"epoch {self.start_epoch + epoch_idx}")
+            for item in self.data_loader:
                 person_input, person_m1, person_m2t, person_label, person_traj_len = item
 
-                # first, try batch_size = 1 and mini_batch = 1
+                input_mask = torch.zeros((self.batch_size, max_len, 3), dtype=torch.long, device=self.device)
+                m1_mask = torch.zeros(
+                    (self.batch_size, max_len, max_len, 2), dtype=torch.float32, device=self.device
+                )
+                full_len = int(person_traj_len[0].item())
 
-                input_mask = torch.zeros((self.batch_size, max_len, 3), dtype=torch.long).to(device)
-                m1_mask = torch.zeros((self.batch_size, max_len, max_len, 2), dtype=torch.float32).to(device)
-                for mask_len in range(1, person_traj_len[0]+1):  # from 1 -> len
-                    # if mask_len != person_traj_len[0]:
-                    #     continue
-                    input_mask[:, :mask_len] = 1.
-                    m1_mask[:, :mask_len, :mask_len] = 1.
+                for mask_len in range(1, full_len + 1):
+                    input_mask[:, :mask_len] = 1
+                    m1_mask[:, :mask_len, :mask_len] = 1
 
                     train_input = person_input * input_mask
                     train_m1 = person_m1 * m1_mask
                     train_m2t = person_m2t[:, mask_len - 1]
-                    train_label = person_label[:, mask_len - 1]  # (N)
-                    train_len = torch.zeros(size=(self.batch_size,), dtype=torch.long).to(device) + mask_len
+                    train_label = person_label[:, mask_len - 1]
+                    train_len = torch.full((self.batch_size,), mask_len, dtype=torch.long, device=self.device)
 
-                    prob = self.model(train_input, train_m1, self.mat2s, train_m2t, train_len)  # (N, L)
+                    prob = self.model(train_input, train_m1, self.mat2s, train_m2t, train_len)
 
-                    if mask_len <= person_traj_len[0] - 2:  # only training
-                        # nn.utils.clip_grad_norm_(self.model.parameters(), 10)
+                    if mask_len <= full_len - 2:
                         prob_sample, label_sample = sampling_prob(prob, train_label, self.num_neg)
                         loss_train = F.cross_entropy(prob_sample, label_sample)
                         loss_train.backward()
                         optimizer.step()
-                        optimizer.zero_grad()
+                        optimizer.zero_grad(set_to_none=True)
                         scheduler.step()
-
-                    elif mask_len == person_traj_len[0] - 1:  # only validation
+                    elif mask_len == full_len - 1:
                         valid_size += person_input.shape[0]
-                        # v_prob_sample, v_label_sample = sampling_prob(prob_valid, valid_label, self.num_neg)
-                        # loss_valid += F.cross_entropy(v_prob_sample, v_label_sample, reduction='sum')
-                        acc_valid += calculate_acc(prob, train_label)
-
-                    elif mask_len == person_traj_len[0]:  # only test
+                        acc_valid += calculate_recall(prob, train_label)
+                    else:
                         test_size += person_input.shape[0]
-                        # v_prob_sample, v_label_sample = sampling_prob(prob_valid, valid_label, self.num_neg)
-                        # loss_valid += F.cross_entropy(v_prob_sample, v_label_sample, reduction='sum')
-                        acc_test += calculate_acc(prob, train_label)
+                        acc_test += calculate_recall(prob, train_label)
 
                 bar.update(self.batch_size)
             bar.close()
 
-            acc_valid = np.array(acc_valid) / valid_size
-            print('epoch:{}, time:{}, valid_acc:{}'.format(self.start_epoch + t, time.time() - start, acc_valid))
+            acc_valid = acc_valid / max(valid_size, 1)
+            acc_test = acc_test / max(test_size, 1)
+            elapsed = time.time() - start_time
+            print(
+                f"epoch:{self.start_epoch + epoch_idx}, time:{elapsed:.2f}, "
+                f"valid_recall@5:{acc_valid[1]:.4f}, valid_recall@10:{acc_valid[2]:.4f}"
+            )
+            print(
+                f"epoch:{self.start_epoch + epoch_idx}, time:{elapsed:.2f}, "
+                f"test_recall@5:{acc_test[1]:.4f}, test_recall@10:{acc_test[2]:.4f}"
+            )
 
-            acc_test = np.array(acc_test) / test_size
-            print('epoch:{}, time:{}, test_acc:{}'.format(self.start_epoch + t, time.time() - start, acc_test))
-
-            self.records['acc_valid'].append(acc_valid)
-            self.records['acc_test'].append(acc_test)
-            self.records['epoch'].append(self.start_epoch + t)
+            self.records["acc_valid"].append(acc_valid)
+            self.records["acc_test"].append(acc_test)
+            self.records["epoch"].append(self.start_epoch + epoch_idx)
 
             if self.threshold < np.mean(acc_valid):
                 self.threshold = np.mean(acc_valid)
-                # save the model
-                torch.save({'state_dict': self.model.state_dict(),
-                            'records': self.records,
-                            'time': time.time() - start},
-                           'best_stan_win_1000_' + dname + '.pth')
-
-    def inference(self):
-        user_ids = []
-        for t in range(self.num_epoch):
-            # settings or validation and test
-            valid_size, test_size = 0, 0
-            acc_valid, acc_test = [0, 0, 0, 0], [0, 0, 0, 0]
-            cum_valid, cum_test = [0, 0, 0, 0], [0, 0, 0, 0]
-
-            for step, item in enumerate(self.data_loader):
-                # get batch data, (N, M, 3), (N, M, M, 2), (N, M, M), (N, M), (N)
-                person_input, person_m1, person_m2t, person_label, person_traj_len = item
-
-                # first, try batch_size = 1 and mini_batch = 1
-
-                input_mask = torch.zeros((self.batch_size, max_len, 3), dtype=torch.long).to(device)
-                m1_mask = torch.zeros((self.batch_size, max_len, max_len, 2), dtype=torch.float32).to(device)
-                for mask_len in range(1, person_traj_len[0] + 1):  # from 1 -> len
-                    # if mask_len != person_traj_len[0]:
-                    #     continue
-                    input_mask[:, :mask_len] = 1.
-                    m1_mask[:, :mask_len, :mask_len] = 1.
-
-                    train_input = person_input * input_mask
-                    train_m1 = person_m1 * m1_mask
-                    train_m2t = person_m2t[:, mask_len - 1]
-                    train_label = person_label[:, mask_len - 1]  # (N)
-                    train_len = torch.zeros(size=(self.batch_size,), dtype=torch.long).to(device) + mask_len
-
-                    prob = self.model(train_input, train_m1, self.mat2s, train_m2t, train_len)  # (N, L)
-
-                    if mask_len <= person_traj_len[0] - 2:  # only training
-                        continue
-
-                    elif mask_len == person_traj_len[0] - 1:  # only validation
-                        acc_valid = calculate_acc(prob, train_label)
-                        cum_valid += calculate_acc(prob, train_label)
-
-                    elif mask_len == person_traj_len[0]:  # only test
-                        acc_test = calculate_acc(prob, train_label)
-                        cum_test += calculate_acc(prob, train_label)
-
-                print(step, acc_valid, acc_test)
-
-                if acc_valid.sum() == 0 and acc_test.sum() == 0:
-                    user_ids.append(step)
+                torch.save(
+                    {
+                        "state_dict": self.model.state_dict(),
+                        "records": self.records,
+                        "time": elapsed,
+                        "device": str(self.device),
+                    },
+                    self.save_path,
+                )
 
 
-if __name__ == '__main__':
-    # load data
-    dname = 'NYC'
-    file = open('./data/' + dname + '_data.pkl', 'rb')
-    file_data = joblib.load(file)
-    # tensor(NUM, M, 3), np(NUM, M, M, 2), np(L, L), np(NUM, M, M), tensor(NUM, M), np(NUM)
-    [trajs, mat1, mat2s, mat2t, labels, lens, u_max, l_max] = file_data
-    mat1, mat2s, mat2t, lens = torch.FloatTensor(mat1), torch.FloatTensor(mat2s).to(device), \
-                               torch.FloatTensor(mat2t), torch.LongTensor(lens)
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train STAN on a processed dataset.")
+    parser.add_argument("--dataset", default="NYC")
+    parser.add_argument("--data-dir", default="./data")
+    parser.add_argument("--device", default="auto", help="auto, cpu, mps, or cuda")
+    parser.add_argument("--part", type=int, default=100, help="Number of users to train on. Use -1 for all users.")
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--learning-rate", type=float, default=3e-3)
+    parser.add_argument("--num-neg", type=int, default=10)
+    parser.add_argument("--embed-dim", type=int, default=50)
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--checkpoint", default=None)
+    return parser.parse_args()
 
-    # the run speed is very flow due to the use of location matrix (also huge memory cost)
-    # please use a partition of the data (recommended)
-    part = 100
-    trajs, mat1, mat2t, labels, lens = \
-        trajs[:part], mat1[:part], mat2t[:part], labels[:part], lens[:part]
 
-    ex = mat1[:, :, :, 0].max(), mat1[:, :, :, 0].min(), mat1[:, :, :, 1].max(), mat1[:, :, :, 1].min()
+def main():
+    args = parse_args()
+    args.device = resolve_device(args.device)
+    checkpoint_path = args.checkpoint or f"best_stan_{args.dataset}.pth"
+    args.checkpoint = checkpoint_path
 
-    stan = Model(t_dim=hours+1, l_dim=l_max+1, u_dim=u_max+1, embed_dim=50, ex=ex, dropout=0)
-    num_params = 0
+    data_path = Path(args.data_dir) / f"{args.dataset}_data.pkl"
+    with data_path.open("rb") as handle:
+        file_data = joblib.load(handle)
 
-    for name in stan.state_dict():
-        print(name)
+    trajs, mat1, mat2s, mat2t, labels, lens, u_max, l_max = file_data
+    mat1 = torch.as_tensor(mat1, dtype=torch.float32)
+    mat2s = torch.as_tensor(mat2s, dtype=torch.float32, device=args.device)
+    mat2t = torch.as_tensor(mat2t, dtype=torch.float32)
+    lens = torch.as_tensor(lens, dtype=torch.long)
 
-    for param in stan.parameters():
-        num_params += param.numel()
-    print('num of params', num_params)
+    if args.part > 0:
+        trajs = trajs[: args.part]
+        mat1 = mat1[: args.part]
+        mat2t = mat2t[: args.part]
+        labels = labels[: args.part]
+        lens = lens[: args.part]
 
-    load = False
+    ex = (mat1[:, :, :, 0].max(), mat1[:, :, :, 0].min(), mat1[:, :, :, 1].max(), mat1[:, :, :, 1].min())
+    model = Model(t_dim=hours + 1, l_dim=l_max + 1, u_dim=u_max + 1, embed_dim=args.embed_dim, ex=ex, dropout=0)
 
-    if load:
-        checkpoint = torch.load('best_stan_win_' + dname + '.pth')
-        stan.load_state_dict(checkpoint['state_dict'])
-        start = time.time() - checkpoint['time']
-        records = checkpoint['records']
-    else:
-        records = {'epoch': [], 'acc_valid': [], 'acc_test': []}
-        start = time.time()
+    records = {"epoch": [], "acc_valid": [], "acc_test": []}
+    if args.resume and Path(checkpoint_path).exists():
+        checkpoint = torch.load(checkpoint_path, map_location=args.device)
+        model.load_state_dict(checkpoint["state_dict"])
+        records = checkpoint["records"]
 
-    trainer = Trainer(stan, records)
+    trainer = Trainer(
+        model,
+        records,
+        tensors=(trajs, mat1, mat2t, labels - 1, lens),
+        args=argparse.Namespace(**vars(args), mat2s=mat2s),
+    )
     trainer.train()
-    # trainer.inference()
 
+    best_idx = int(np.argmax([np.mean(item) for item in trainer.records["acc_valid"]]))
+    best_epoch = trainer.records["epoch"][best_idx]
+    best_valid = trainer.records["acc_valid"][best_idx]
+    best_test = trainer.records["acc_test"][best_idx]
+    print(
+        f"best_epoch:{best_epoch}, valid_recall@5:{best_valid[1]:.4f}, "
+        f"valid_recall@10:{best_valid[2]:.4f}"
+    )
+    print(
+        f"best_epoch:{best_epoch}, test_recall@5:{best_test[1]:.4f}, "
+        f"test_recall@10:{best_test[2]:.4f}"
+    )
+
+
+if __name__ == "__main__":
+    main()

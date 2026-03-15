@@ -1,0 +1,33 @@
+# Python cache and local tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# IDE / editor files
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+
+# Local environments
+.venv/
+venv/
+env/
+
+# Training artifacts
+*.pth
+*.pt
+*.ckpt
+*.log
+
+# Generated datasets and raw downloads
+data/raw/
+data/*_data.pkl
+data/Gowalla.npy
+data/Gowalla_POI.npy
+
+# Keep the original repo sample files tracked
+!data/NYC.npy
+!data/NYC_POI.npy
