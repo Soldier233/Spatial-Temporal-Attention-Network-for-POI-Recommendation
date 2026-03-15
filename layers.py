@@ -128,3 +128,55 @@ class MultiEmbed(nn.Module):
         space_interval = (esl * vsu + esu * vsl) / max(self.su - self.sl, 1e-6)
         time_interval = (etl * vtu + etu * vtl) / max(self.tu - self.tl, 1e-6)
         return joint, space_interval + time_interval
+
+
+class SemanticBias(nn.Module):
+    def __init__(self, loc_max):
+        super().__init__()
+        self.loc_max = loc_max
+
+    def forward(self, traj_loc, semantic_mat, traj_len):
+        device = traj_loc.device
+        batch_size = traj_loc.shape[0]
+        semantic_bias = torch.zeros((batch_size, self.loc_max), dtype=torch.float32, device=device)
+        for idx in range(batch_size):
+            valid_len = int(traj_len[idx].item())
+            if valid_len <= 0:
+                continue
+            hist = traj_loc[idx, :valid_len]
+            hist = hist[hist > 0] - 1
+            if hist.numel() == 0:
+                continue
+            weights = torch.linspace(1.0, 2.0, hist.numel(), device=device)
+            weights = weights / weights.sum()
+            semantic_bias[idx] = (semantic_mat.index_select(0, hist) * weights[:, None]).sum(dim=0)
+        return semantic_bias
+
+
+class PersonalBias(nn.Module):
+    def __init__(self, loc_max):
+        super().__init__()
+        self.loc_max = loc_max
+
+    def forward(self, traj_loc, traj_len):
+        device = traj_loc.device
+        batch_size = traj_loc.shape[0]
+        personal_bias = torch.zeros((batch_size, self.loc_max), dtype=torch.float32, device=device)
+        for idx in range(batch_size):
+            valid_len = int(traj_len[idx].item())
+            hist = traj_loc[idx, :valid_len]
+            hist = hist[hist > 0] - 1
+            if hist.numel() == 0:
+                continue
+            counts = torch.bincount(hist, minlength=self.loc_max).float()
+            personal_bias[idx] = counts / counts.sum().clamp_min(1.0)
+        return personal_bias
+
+
+class SocialBias(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, user_ids, social_mat):
+        # user_ids starts from 1; social_mat is (U, L)
+        return social_mat.index_select(0, user_ids - 1)

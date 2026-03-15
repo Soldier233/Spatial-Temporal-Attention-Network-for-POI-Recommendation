@@ -17,11 +17,26 @@ class Model(nn.Module):
         self.SelfAttn = SelfAttn(embed_dim, embed_dim)
         self.Embed = Embed(ex, embed_dim, l_dim-1, embed_layers)
         self.Attn = Attn(emb_l, l_dim-1)
+        self.SemanticBias = SemanticBias(l_dim - 1)
+        self.PersonalBias = PersonalBias(l_dim - 1)
+        self.SocialBias = SocialBias()
+        self.semantic_scale = nn.Parameter(torch.tensor(1.0))
+        self.personal_scale = nn.Parameter(torch.tensor(1.0))
+        self.social_scale = nn.Parameter(torch.tensor(1.0))
 
-    def forward(self, traj, mat1, mat2, vec, traj_len):
+    def forward(self, traj, mat1, mat2, vec, traj_len, semantic_mat, social_mat):
         # long(N, M, [u, l, t]), float(N, M, M, 2), float(L, L), float(N, M), long(N)
         joint, delta = self.MultiEmbed(traj, mat1, traj_len)  # (N, M, emb), (N, M, M, emb)
         self_attn = self.SelfAttn(joint, delta, traj_len)  # (N, M, emb)
         self_delta = self.Embed(traj[:, :, 1], mat2, vec, traj_len)  # (N, M, L, emb)
         output = self.Attn(self_attn, self_delta, traj_len)  # (N, L)
+        semantic_bias = self.SemanticBias(traj[:, :, 1], semantic_mat, traj_len)
+        personal_bias = self.PersonalBias(traj[:, :, 1], traj_len)
+        social_bias = self.SocialBias(traj[:, 0, 0], social_mat)
+        output = (
+            output
+            + self.semantic_scale * semantic_bias
+            + self.personal_scale * personal_bias
+            + self.social_scale * social_bias
+        )
         return output

@@ -47,6 +47,59 @@ def rt_mat2t(traj_time):  # traj_time (*M+1) triangle matrix
     return np.abs(label[:, None] - hist[None, :]).astype(np.float32)
 
 
+def build_semantic_matrix(data, l_max, window_size=3):
+    # Derive POI semantic similarity from local trajectory co-occurrence.
+    pair = np.zeros((l_max, l_max), dtype=np.float32)
+    freq = np.zeros(l_max, dtype=np.float32)
+    users = np.unique(data[:, 0])
+    for user_id in users:
+        user_traj = data[data[:, 0] == user_id]
+        user_traj = user_traj[np.argsort(user_traj[:, 2])]
+        locs = user_traj[:, 1].astype(np.int64) - 1
+        for idx, loc in enumerate(locs):
+            freq[loc] += 1
+            left = max(0, idx - window_size)
+            right = min(len(locs), idx + window_size + 1)
+            context = np.unique(locs[left:right])
+            pair[loc, context] += 1
+
+    denom = np.sqrt(np.outer(np.maximum(freq, 1.0), np.maximum(freq, 1.0)))
+    semantic = pair / denom
+    semantic = np.clip(semantic, 0.0, 1.0)
+    np.fill_diagonal(semantic, 1.0)
+    return semantic.astype(np.float32)
+
+
+def build_social_matrix(data, u_max, l_max, top_k=20):
+    # Social proxy: aggregate preferences from similar users when no explicit graph is available.
+    visits = np.zeros((u_max, l_max), dtype=np.float32)
+    for user_id, loc_id, _ in data:
+        visits[int(user_id) - 1, int(loc_id) - 1] += 1.0
+
+    row_sum = visits.sum(axis=1, keepdims=True)
+    pref = visits / np.maximum(row_sum, 1.0)
+
+    binary = (visits > 0).astype(np.float32)
+    overlap = binary @ binary.T
+    degree = binary.sum(axis=1, keepdims=True)
+    union = degree + degree.T - overlap
+    sim = overlap / np.maximum(union, 1.0)
+    np.fill_diagonal(sim, 0.0)
+
+    social = np.zeros_like(pref)
+    for user_idx in range(u_max):
+        neighbor_idx = np.argpartition(sim[user_idx], -min(top_k, u_max - 1))[-min(top_k, u_max - 1) :]
+        weights = sim[user_idx, neighbor_idx]
+        valid = weights > 0
+        if np.any(valid):
+            weights = weights[valid]
+            neighbors = neighbor_idx[valid]
+            social[user_idx] = (weights[:, None] * pref[neighbors]).sum(axis=0) / np.maximum(weights.sum(), 1e-6)
+        else:
+            social[user_idx] = pref[user_idx]
+    return social.astype(np.float32)
+
+
 def process_traj(dname, data_dir="./data"):
     # data (?, [u, l, t]), poi (L, [l, lat, lon])
     base_dir = Path(data_dir)
@@ -85,13 +138,15 @@ def process_traj(dname, data_dir="./data"):
         lens.append(user_len - 2)
 
     mat2s = rs_mat2s(poi)
+    semantic = build_semantic_matrix(data, l_max)
+    social = build_social_matrix(data, u_max, l_max)
     zipped = zip(*sorted(zip(trajs, mat1, mat2t, labels, lens), key=lambda x: len(x[0]), reverse=True))
     trajs, mat1, mat2t, labels, lens = zipped
     trajs, mat1, mat2t, labels, lens = list(trajs), list(mat1), list(mat2t), list(labels), list(lens)
     trajs = pad_sequence(trajs, batch_first=True, padding_value=0)
     labels = pad_sequence(labels, batch_first=True, padding_value=0)
 
-    processed = [trajs, np.array(mat1), mat2s, np.array(mat2t), labels, np.array(lens), u_max, l_max]
+    processed = [trajs, np.array(mat1), mat2s, np.array(mat2t), semantic, social, labels, np.array(lens), u_max, l_max]
     data_pkl = base_dir / f"{dname}_data.pkl"
     with data_pkl.open("wb") as pkl:
         joblib.dump(processed, pkl)

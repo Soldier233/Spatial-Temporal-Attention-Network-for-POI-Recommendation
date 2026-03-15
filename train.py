@@ -88,6 +88,8 @@ class Trainer:
         )
         self.part = len(tensors[0])
         self.mat2s = args.mat2s
+        self.semantic = args.semantic
+        self.social = args.social
 
     def train(self):
         optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=0)
@@ -120,7 +122,7 @@ class Trainer:
                     train_label = person_label[:, mask_len - 1]
                     train_len = torch.full((self.batch_size,), mask_len, dtype=torch.long, device=self.device)
 
-                    prob = self.model(train_input, train_m1, self.mat2s, train_m2t, train_len)
+                    prob = self.model(train_input, train_m1, self.mat2s, train_m2t, train_len, self.semantic, self.social)
 
                     if mask_len <= full_len - 2:
                         prob_sample, label_sample = sampling_prob(prob, train_label, self.num_neg)
@@ -194,10 +196,12 @@ def main():
     with data_path.open("rb") as handle:
         file_data = joblib.load(handle)
 
-    trajs, mat1, mat2s, mat2t, labels, lens, u_max, l_max = file_data
+    trajs, mat1, mat2s, mat2t, semantic, social, labels, lens, u_max, l_max = file_data
     mat1 = torch.as_tensor(mat1, dtype=torch.float32)
     mat2s = torch.as_tensor(mat2s, dtype=torch.float32, device=args.device)
     mat2t = torch.as_tensor(mat2t, dtype=torch.float32)
+    semantic = torch.as_tensor(semantic, dtype=torch.float32, device=args.device)
+    social = torch.as_tensor(social, dtype=torch.float32, device=args.device)
     lens = torch.as_tensor(lens, dtype=torch.long)
 
     if args.part > 0:
@@ -220,7 +224,7 @@ def main():
         model,
         records,
         tensors=(trajs, mat1, mat2t, labels - 1, lens),
-        args=argparse.Namespace(**vars(args), mat2s=mat2s),
+        args=argparse.Namespace(**vars(args), mat2s=mat2s, semantic=semantic, social=social),
     )
     trainer.train()
 
