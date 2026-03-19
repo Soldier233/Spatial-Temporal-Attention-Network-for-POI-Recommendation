@@ -138,7 +138,7 @@ class Trainer:
         self.batch_size = args.batch_size
         self.learning_rate = args.learning_rate
         self.num_epoch = args.epochs
-        self.threshold = np.mean(records["acc_valid"][-1]) if records["acc_valid"] else 0
+        self.threshold = np.mean(records["acc_valid"][-1]) if records["acc_valid"] else float("-inf")
         self.save_path = Path(args.checkpoint)
         self.data_loader = data.DataLoader(
             dataset=DataSet(*tensors, device=args.device),
@@ -150,16 +150,22 @@ class Trainer:
         self.semantic = args.semantic
         self.social = args.social
 
+    def evaluate(self, batch_size=1):
+        return evaluate_model(
+            self.model,
+            tensors=(self.data_loader.dataset.traj, self.data_loader.dataset.mat1, self.mat2s,
+                     self.data_loader.dataset.vec, self.semantic, self.social,
+                     self.data_loader.dataset.label + 1, self.data_loader.dataset.length),
+            device=self.device,
+            batch_size=batch_size,
+        )
+
     def train(self):
         optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=0)
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1000, gamma=1)
 
         start_time = time.time()
         for epoch_idx in range(self.num_epoch):
-            valid_size, test_size = 0, 0
-            acc_valid = np.zeros(4, dtype=np.float64)
-            acc_test = np.zeros(4, dtype=np.float64)
-
             self.model.train()
             bar = tqdm(total=self.part, desc=f"epoch {self.start_epoch + epoch_idx}")
             for item in self.data_loader:
@@ -190,18 +196,13 @@ class Trainer:
                         optimizer.step()
                         optimizer.zero_grad(set_to_none=True)
                         scheduler.step()
-                    elif mask_len == full_len - 1:
-                        valid_size += person_input.shape[0]
-                        acc_valid += calculate_recall(prob, train_label)
-                    else:
-                        test_size += person_input.shape[0]
-                        acc_test += calculate_recall(prob, train_label)
 
                 bar.update(self.batch_size)
             bar.close()
 
-            acc_valid = acc_valid / max(valid_size, 1)
-            acc_test = acc_test / max(test_size, 1)
+            metrics = self.evaluate(batch_size=1)
+            acc_valid = metrics["valid"]
+            acc_test = metrics["test"]
             elapsed = time.time() - start_time
             print(
                 f"epoch:{self.start_epoch + epoch_idx}, time:{elapsed:.2f}, "
@@ -227,6 +228,58 @@ class Trainer:
                     },
                     self.save_path,
                 )
+
+
+def evaluate_model(model, tensors, device, batch_size=1):
+    trajs, mat1, mat2s, mat2t, semantic, social, labels, lens = tensors
+    loader = data.DataLoader(
+        dataset=DataSet(trajs, mat1, mat2t, labels - 1, lens, device=device),
+        batch_size=batch_size,
+        shuffle=False,
+    )
+
+    valid_size, test_size = 0, 0
+    acc_valid = np.zeros(4, dtype=np.float64)
+    acc_test = np.zeros(4, dtype=np.float64)
+
+    model.eval()
+    with torch.no_grad():
+        for item in loader:
+            person_input, person_m1, person_m2t, person_label, person_traj_len = item
+            current_batch = person_input.shape[0]
+
+            input_mask = torch.zeros((current_batch, max_len, 3), dtype=torch.long, device=device)
+            m1_mask = torch.zeros((current_batch, max_len, max_len, 2), dtype=torch.float32, device=device)
+
+            for row_idx in range(current_batch):
+                full_len = int(person_traj_len[row_idx].item())
+                for mask_len in range(1, full_len + 1):
+                    input_mask[row_idx].zero_()
+                    m1_mask[row_idx].zero_()
+                    input_mask[row_idx, :mask_len] = 1
+                    m1_mask[row_idx, :mask_len, :mask_len] = 1
+
+                    eval_input = person_input[row_idx : row_idx + 1] * input_mask[row_idx : row_idx + 1]
+                    eval_m1 = person_m1[row_idx : row_idx + 1] * m1_mask[row_idx : row_idx + 1]
+                    eval_m2t = person_m2t[row_idx : row_idx + 1, mask_len - 1]
+                    eval_label = person_label[row_idx : row_idx + 1, mask_len - 1]
+                    eval_len = torch.full((1,), mask_len, dtype=torch.long, device=device)
+
+                    prob = model(eval_input, eval_m1, mat2s, eval_m2t, eval_len, semantic, social)
+                    if mask_len == full_len - 1:
+                        valid_size += 1
+                        acc_valid += calculate_recall(prob, eval_label)
+                    elif mask_len == full_len:
+                        test_size += 1
+                        acc_test += calculate_recall(prob, eval_label)
+
+    model.train()
+    return {
+        "valid": acc_valid / max(valid_size, 1),
+        "test": acc_test / max(test_size, 1),
+        "valid_size": valid_size,
+        "test_size": test_size,
+    }
 
 
 def parse_args():

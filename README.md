@@ -214,6 +214,50 @@ python run_paper_benchmark.py \
   --baseline-glob 'runs/baseline/*.pth'
 ```
 
+For a full paper-style reproduction run on a CUDA machine:
+
+```bash
+python run_paper_benchmark.py \
+  --dataset NYC \
+  --device cuda \
+  --part -1 \
+  --epochs 10 \
+  --repeats 10 \
+  --output-dir ./paper_runs/NYC_full_cuda
+```
+
+For Gowalla:
+
+```bash
+python run_paper_benchmark.py \
+  --dataset Gowalla \
+  --device cuda \
+  --part -1 \
+  --epochs 10 \
+  --repeats 10 \
+  --output-dir ./paper_runs/Gowalla_full_cuda
+```
+
+For a full paper-style comparison with paired T-test on a CUDA machine:
+
+```bash
+python run_paper_benchmark.py \
+  --dataset NYC \
+  --device cuda \
+  --part -1 \
+  --epochs 10 \
+  --repeats 10 \
+  --output-dir ./paper_runs/NYC_full_cuda \
+  --baseline-glob 'runs/baseline/*.pth'
+```
+
+Notes:
+
+- `--part -1` evaluates all processed users
+- `--repeats 10` matches the paper's 10-run averaging protocol
+- `summary.json` stores the averaged metrics, and `stan_runs.csv` stores each run separately
+- use `--seeds 0,1,2,3,4,5,6,7,8,9` if you want to pin the exact seed list explicitly
+
 ## FAQs
 Q1: Can you provide a dataset?  
 A1: Our datasets are collected from the following links. Please feel free to do your own data processing on your model while comparing STAN as baseline.

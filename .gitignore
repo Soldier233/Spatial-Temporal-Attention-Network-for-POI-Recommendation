@@ -15,12 +15,21 @@ __pycache__/
 .venv/
 venv/
 env/
+.env
+.conda/
 
 # Training artifacts
 *.pth
 *.pt
 *.ckpt
 *.log
+*.out
+*.err
+*.png
+
+# Experiment outputs
+paper_runs/
+results/
 
 # Generated datasets and raw downloads
 data/raw/
@@ -32,4 +41,9 @@ data/Gowalla_POI.npy
 # Keep the original repo sample files tracked
 !data/NYC.npy
 !data/NYC_POI.npy
+!results/
 !results/*.pth
+
+# Notebook and matplotlib caches
+.ipynb_checkpoints/
+.matplotlib/
