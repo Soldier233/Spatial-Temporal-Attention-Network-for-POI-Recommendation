@@ -161,6 +161,59 @@ python train.py --dataset NYC --device cpu --plot-records --plot-output ./nyc_re
 
 This reads `records` from `best_stan_NYC.pth` (or the file given by `--checkpoint`) and writes a figure with validation and test recall curves.
 
+## Benchmark
+Evaluate a saved best checkpoint by running the model on the processed dataset and reporting `recall@5` / `recall@10`:
+
+```bash
+python benchmark.py --dataset NYC --device cpu
+python benchmark.py --dataset Gowalla --device cpu --checkpoint ./best_stan_Gowalla.pth
+```
+
+This follows the repo's current split logic:
+
+- validation uses each user's penultimate prediction step
+- test uses each user's final prediction step
+
+For a paper-style comparison with 10 independent runs and a paired T-test at `p=0.01`:
+
+```bash
+python benchmark.py \
+  --dataset NYC \
+  --device cpu \
+  --checkpoint-glob 'runs/stan/*.pth' \
+  --baseline-glob 'runs/baseline/*.pth'
+```
+
+Notes:
+
+- `--checkpoint-glob` should match the 10 STAN checkpoints from 10 independent runs
+- `--baseline-glob` should match the 10 checkpoints of the compared method in the same run order
+- the paired T-test requires `scipy`
+
+Run the whole paper-style workflow in one command:
+
+```bash
+python run_paper_benchmark.py --dataset NYC --device cpu --part 100 --epochs 10
+```
+
+This script will:
+
+- train multiple seeds and save `best` checkpoints under `paper_runs/<dataset>/checkpoints/`
+- benchmark each saved checkpoint with `recall@5` and `recall@10`
+- compute mean/std over all runs
+- save a per-run CSV and a summary JSON
+
+To compare STAN against another method with a paired T-test:
+
+```bash
+python run_paper_benchmark.py \
+  --dataset NYC \
+  --device cpu \
+  --part 100 \
+  --epochs 10 \
+  --baseline-glob 'runs/baseline/*.pth'
+```
+
 ## FAQs
 Q1: Can you provide a dataset?  
 A1: Our datasets are collected from the following links. Please feel free to do your own data processing on your model while comparing STAN as baseline.

@@ -1,4 +1,5 @@
 import argparse
+import random
 import time
 from pathlib import Path
 
@@ -13,6 +14,14 @@ from tqdm import tqdm
 from layers import hours, resolve_device
 from load import max_len
 from models import Model
+
+
+def set_random_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def load_checkpoint_records(checkpoint_path, device):
@@ -231,6 +240,7 @@ def parse_args():
     parser.add_argument("--learning-rate", type=float, default=3e-3)
     parser.add_argument("--num-neg", type=int, default=10)
     parser.add_argument("--embed-dim", type=int, default=50)
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--plot-records", action="store_true", help="Load records from checkpoint and save recall curves.")
@@ -241,6 +251,7 @@ def parse_args():
 def main():
     args = parse_args()
     args.device = resolve_device(args.device)
+    set_random_seed(args.seed)
     checkpoint_path = args.checkpoint or f"best_stan_{args.dataset}.pth"
     args.checkpoint = checkpoint_path
 
