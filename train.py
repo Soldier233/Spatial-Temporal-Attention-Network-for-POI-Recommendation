@@ -15,6 +15,56 @@ from load import max_len
 from models import Model
 
 
+def load_checkpoint_records(checkpoint_path, device):
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+    records = checkpoint.get("records", {})
+    if not records or not records.get("epoch"):
+        raise ValueError(f"No training records found in checkpoint: {checkpoint_path}")
+    return checkpoint, records
+
+
+def plot_records(records, output_path):
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise ImportError("matplotlib is required for plotting. Install it with `pip install matplotlib`.") from exc
+
+    epochs = records["epoch"]
+    valid = np.asarray(records["acc_valid"], dtype=np.float64)
+    test = np.asarray(records["acc_test"], dtype=np.float64)
+    ks = (1, 5, 10, 20)
+
+    fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    for idx, k in enumerate(ks):
+        axes[0].plot(epochs, valid[:, idx], marker="o", linewidth=1.5, label=f"Recall@{k}")
+        axes[1].plot(epochs, test[:, idx], marker="o", linewidth=1.5, label=f"Recall@{k}")
+
+    axes[0].set_title("Validation Recall Curves")
+    axes[1].set_title("Test Recall Curves")
+    axes[1].set_xlabel("Epoch")
+    axes[0].set_ylabel("Recall")
+    axes[1].set_ylabel("Recall")
+    axes[0].grid(True, linestyle="--", alpha=0.4)
+    axes[1].grid(True, linestyle="--", alpha=0.4)
+    axes[0].legend()
+    axes[1].legend()
+
+    fig.tight_layout()
+    output_path = Path(output_path)
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
+def plot_records_from_checkpoint(checkpoint_path, device, output_path=None):
+    _, records = load_checkpoint_records(checkpoint_path, device)
+    target_path = output_path or (Path(checkpoint_path).with_suffix("").as_posix() + "_records.png")
+    return plot_records(records, target_path)
+
+
 def calculate_recall(prob, label, ks=(1, 5, 10, 20)):
     label = label.view(-1, 1)
     topk = torch.topk(prob, k=max(ks), dim=1).indices
@@ -183,6 +233,8 @@ def parse_args():
     parser.add_argument("--embed-dim", type=int, default=50)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--checkpoint", default=None)
+    parser.add_argument("--plot-records", action="store_true", help="Load records from checkpoint and save recall curves.")
+    parser.add_argument("--plot-output", default=None, help="Output image path for plotted records.")
     return parser.parse_args()
 
 
@@ -191,6 +243,11 @@ def main():
     args.device = resolve_device(args.device)
     checkpoint_path = args.checkpoint or f"best_stan_{args.dataset}.pth"
     args.checkpoint = checkpoint_path
+
+    if args.plot_records:
+        output_path = plot_records_from_checkpoint(checkpoint_path, args.device, args.plot_output)
+        print(f"records_plot:{output_path}")
+        return
 
     data_path = Path(args.data_dir) / f"{args.dataset}_data.pkl"
     with data_path.open("rb") as handle:
@@ -219,9 +276,8 @@ def main():
 
     records = {"epoch": [], "acc_valid": [], "acc_test": []}
     if args.resume and Path(checkpoint_path).exists():
-        checkpoint = torch.load(checkpoint_path, map_location=args.device)
+        checkpoint, records = load_checkpoint_records(checkpoint_path, args.device)
         model.load_state_dict(checkpoint["state_dict"])
-        records = checkpoint["records"]
 
     trainer = Trainer(
         model,
@@ -243,6 +299,10 @@ def main():
         f"best_epoch:{best_epoch}, test_recall@5:{best_test[1]:.4f}, "
         f"test_recall@10:{best_test[2]:.4f}"
     )
+
+    if Path(checkpoint_path).exists():
+        output_path = plot_records_from_checkpoint(checkpoint_path, args.device, args.plot_output)
+        print(f"records_plot:{output_path}")
 
 
 if __name__ == "__main__":

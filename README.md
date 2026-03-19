@@ -147,8 +147,19 @@ Useful flags:
 - `--epochs N`
 - `--embed-dim N`
 - `--resume` to continue from a saved checkpoint
+- `--plot-records` to load `records` from the best checkpoint and save recall curves
+- `--plot-output PATH` to choose where the chart image is written
 
 The trainer reports recall at `[1, 5, 10, 20]`, and prints `recall@5` and `recall@10` explicitly every epoch.
+
+Plot curves directly from the saved best model:
+
+```bash
+python train.py --dataset NYC --device cpu --plot-records
+python train.py --dataset NYC --device cpu --plot-records --plot-output ./nyc_records.png
+```
+
+This reads `records` from `best_stan_NYC.pth` (or the file given by `--checkpoint`) and writes a figure with validation and test recall curves.
 
 ## FAQs
 Q1: Can you provide a dataset?  

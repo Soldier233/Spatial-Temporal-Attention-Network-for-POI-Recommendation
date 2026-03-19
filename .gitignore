@@ -32,3 +32,4 @@ data/Gowalla_POI.npy
 # Keep the original repo sample files tracked
 !data/NYC.npy
 !data/NYC_POI.npy
+!results/*.pth
