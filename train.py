@@ -139,6 +139,9 @@ class Trainer:
         self.learning_rate = args.learning_rate
         self.num_epoch = args.epochs
         self.threshold = np.mean(records["acc_valid"][-1]) if records["acc_valid"] else float("-inf")
+        self.early_stop_patience = args.early_stop_patience
+        self.early_stop_min_delta = args.early_stop_min_delta
+        self.no_improve_count = 0
         self.save_path = Path(args.checkpoint)
         self.data_loader = data.DataLoader(
             dataset=DataSet(*tensors, device=args.device),
@@ -217,8 +220,11 @@ class Trainer:
             self.records["acc_test"].append(acc_test)
             self.records["epoch"].append(self.start_epoch + epoch_idx)
 
-            if self.threshold < np.mean(acc_valid):
-                self.threshold = np.mean(acc_valid)
+            current_score = float(np.mean(acc_valid))
+            improved = current_score > self.threshold + self.early_stop_min_delta
+            if improved:
+                self.threshold = current_score
+                self.no_improve_count = 0
                 torch.save(
                     {
                         "state_dict": self.model.state_dict(),
@@ -228,6 +234,15 @@ class Trainer:
                     },
                     self.save_path,
                 )
+            else:
+                self.no_improve_count += 1
+
+            if self.early_stop_patience > 0 and self.no_improve_count >= self.early_stop_patience:
+                print(
+                    f"early_stop: epoch={self.start_epoch + epoch_idx}, "
+                    f"best_valid_mean={self.threshold:.4f}, patience={self.early_stop_patience}"
+                )
+                break
 
 
 def evaluate_model(model, tensors, device, batch_size=1):
@@ -294,6 +309,18 @@ def parse_args():
     parser.add_argument("--num-neg", type=int, default=10)
     parser.add_argument("--embed-dim", type=int, default=50)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=0,
+        help="Stop training if validation mean recall does not improve for N consecutive epochs. 0 disables early stopping.",
+    )
+    parser.add_argument(
+        "--early-stop-min-delta",
+        type=float,
+        default=0.0,
+        help="Minimum validation mean recall improvement required to reset early stopping patience.",
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--plot-records", action="store_true", help="Load records from checkpoint and save recall curves.")

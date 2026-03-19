@@ -45,6 +45,10 @@ def run_training(args, checkpoint_path, seed):
         str(args.num_neg),
         "--embed-dim",
         str(args.embed_dim),
+        "--early-stop-patience",
+        str(args.early_stop_patience),
+        "--early-stop-min-delta",
+        str(args.early_stop_min_delta),
         "--seed",
         str(seed),
         "--checkpoint",
@@ -104,6 +108,8 @@ def main():
     parser.add_argument("--learning-rate", type=float, default=3e-3)
     parser.add_argument("--num-neg", type=int, default=10)
     parser.add_argument("--embed-dim", type=int, default=50)
+    parser.add_argument("--early-stop-patience", type=int, default=0)
+    parser.add_argument("--early-stop-min-delta", type=float, default=0.0)
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--seeds", default=None, help="Comma-separated seed list. Defaults to 0..repeats-1.")
     parser.add_argument("--output-dir", default=None, help="Directory to store checkpoints and benchmark summaries.")

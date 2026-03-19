@@ -147,6 +147,8 @@ Useful flags:
 - `--epochs N`
 - `--embed-dim N`
 - `--resume` to continue from a saved checkpoint
+- `--early-stop-patience N` to stop after N epochs without validation improvement
+- `--early-stop-min-delta X` to require at least X improvement in validation mean recall
 - `--plot-records` to load `records` from the best checkpoint and save recall curves
 - `--plot-output PATH` to choose where the chart image is written
 
@@ -222,6 +224,7 @@ python run_paper_benchmark.py \
   --device cuda \
   --part -1 \
   --epochs 10 \
+  --early-stop-patience 10 \
   --repeats 10 \
   --output-dir ./paper_runs/NYC_full_cuda
 ```
@@ -234,6 +237,7 @@ python run_paper_benchmark.py \
   --device cuda \
   --part -1 \
   --epochs 10 \
+  --early-stop-patience 10 \
   --repeats 10 \
   --output-dir ./paper_runs/Gowalla_full_cuda
 ```
@@ -246,6 +250,7 @@ python run_paper_benchmark.py \
   --device cuda \
   --part -1 \
   --epochs 10 \
+  --early-stop-patience 10 \
   --repeats 10 \
   --output-dir ./paper_runs/NYC_full_cuda \
   --baseline-glob 'runs/baseline/*.pth'
